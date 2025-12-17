@@ -305,11 +305,13 @@ namespace ProxyPool
             int minProxiesToCheck,
             int maxTimeSeconds)
         {
+            LogInfo($"Testing proxies (up to {_maxParallelTests} in parallel)...");
+
             // Create a thread-safe collection to store working proxies
             var workingProxies = new ConcurrentBag<ProxyInfo>();
 
-            // Create a semaphore to limit parallel tests
-            using var semaphore = new SemaphoreSlim(_maxParallelTests);
+            // Create a semaphore to limit parallel tests (don't use 'using' - we'll dispose it manually after all tasks complete)
+            var semaphore = new SemaphoreSlim(_maxParallelTests);
 
             // Create a set to track which proxies we've already tried
             var triedProxies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -424,7 +426,7 @@ namespace ProxyPool
                                 old.RecordSuccess();
                                 return old;
                             });
-                            LogDebug($"Found working proxy {address}");
+                            LogInfo($"✓ Found working proxy: {address} ({proxyInfo.Type})");
 
                             // Add to the collection of working proxies
                             workingProxies.Add(proxyInfo);
@@ -492,6 +494,20 @@ namespace ProxyPool
             {
                 // Ignore cancellation exceptions
             }
+
+            // IMPORTANT: Wait for ALL tasks to complete before disposing the semaphore
+            // This prevents ObjectDisposedException when tasks try to release the semaphore
+            try
+            {
+                await Task.WhenAll(tasks);
+            }
+            catch
+            {
+                // Ignore all exceptions from tasks - we've already handled them
+            }
+
+            // Now it's safe to dispose the semaphore since all tasks have completed
+            semaphore.Dispose();
 
             LogInfo($"Checked {proxiesStartedChecking} proxies and found {workingProxies.Count} working ones");
 
@@ -856,16 +872,19 @@ namespace ProxyPool
         private void LogInfo(string message)
         {
             Debug.WriteLine($"[INFO] {DateTime.Now}: {message}");
+            Console.WriteLine($"[INFO] {message}");  // Also output to console
         }
 
         private void LogWarning(string message)
         {
             Debug.WriteLine($"[WARNING] {DateTime.Now}: {message}");
+            Console.WriteLine($"[WARNING] {message}");  // Also output to console
         }
 
         private void LogError(string message)
         {
             Debug.WriteLine($"[ERROR] {DateTime.Now}: {message}");
+            Console.WriteLine($"[ERROR] {message}");  // Also output to console
         }
 
         #endregion Logging Methods
