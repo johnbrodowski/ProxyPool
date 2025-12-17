@@ -37,8 +37,8 @@ echo Running Tests...
 echo ==========================================
 echo.
 
-REM Run the tests
-dotnet run --project ProxyPool.Tests --configuration Release
+REM Run the tests with xUnit
+dotnet test ProxyPool.Tests\ProxyPool.Tests.csproj --configuration Release --logger "console;verbosity=normal"
 
 set TEST_RESULT=%ERRORLEVEL%
 

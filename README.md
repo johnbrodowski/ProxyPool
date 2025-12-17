@@ -96,35 +96,48 @@ Console.WriteLine($"Successfully fetched content: {html.Length} bytes");
 
 ## Testing ProxyPool
 
-Want to verify that ProxyPool is working correctly? Run the included test program:
+ProxyPool includes both automated tests and an interactive demo application.
 
-### Quick Test
+### Automated Tests (xUnit)
 
-**Windows:**
+Run automated tests with `dotnet test` or in Visual Studio Test Explorer:
+
 ```bash
-run-tests.bat
+dotnet test
 ```
 
-**Linux/Mac:**
+Or use the test runner scripts:
 ```bash
-./run-tests.sh
+./run-tests.sh    # Linux/Mac
+run-tests.bat     # Windows
 ```
 
-### Manual Test
+**What's tested:**
+- Proxy discovery and testing
+- Statistics tracking
+- Multiple request handling
+- Both ProxyEnabledHttpClient and ProxyManager APIs
+
+See [ProxyPool.Tests/README.md](ProxyPool.Tests/README.md) for details.
+
+### Interactive Demo App
+
+Watch ProxyPool work in real-time with the interactive console demo:
 
 ```bash
-cd ProxyPool.Tests
+cd ProxyPool.Demo
 dotnet run
 ```
 
-The test program will:
-- ✓ Download proxies from a public source
-- ✓ Test multiple proxies in parallel
-- ✓ Find working proxies
-- ✓ Fetch content through proxies
-- ✓ Display detailed statistics
+Or from Visual Studio: Set `ProxyPool.Demo` as startup project and press F5.
 
-See [ProxyPool.Tests/README.md](ProxyPool.Tests/README.md) for more details.
+**The demo shows:**
+- ✓ Real-time proxy discovery and testing
+- ✓ Detailed statistics and top proxies
+- ✓ Color-coded output
+- ✓ Both API styles (ProxyEnabledHttpClient and ProxyManager)
+
+Perfect for understanding how ProxyPool works!
 
 ## Configuration Options
 
