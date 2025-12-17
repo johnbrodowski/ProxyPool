@@ -1,6 +1,8 @@
 # ProxyPool
 
-A robust .NET library for automatic proxy management, rotation, and health checking. ProxyPool enables reliable web scraping and HTTP requests by automatically discovering, testing, and rotating through pools of available proxies.
+A high-performance .NET library for intelligent proxy management with automatic discovery, health monitoring, and smart rotation. Built for reliable web scraping and HTTP requests, ProxyPool automatically finds working proxies from public sources, tests them in parallel, tracks their reliability, and seamlessly rotates through the healthiest options—all with zero configuration required.
+
+Perfect for bypassing rate limits, avoiding IP blocks, and ensuring continuous access to web resources.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.txt)
 [![.NET](https://img.shields.io/badge/.NET-10.0-purple.svg)](https://dotnet.microsoft.com/)
