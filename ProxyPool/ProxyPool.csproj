@@ -4,6 +4,33 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <!-- NuGet Package Metadata -->
+    <PackageId>ProxyPool</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Your Name</Authors>
+    <Company>Your Company</Company>
+    <Product>ProxyPool</Product>
+    <Description>A robust .NET library for automatic proxy management, rotation, and health checking. Enables reliable web scraping and HTTP requests by automatically discovering, testing, and rotating through pools of available proxies.</Description>
+    <Copyright>Copyright (c) 2025</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/yourusername/ProxyPool</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/yourusername/ProxyPool</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>proxy;http-client;web-scraping;proxy-rotation;socks5;socks4;proxy-pool;proxy-manager;reliability;health-check</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReleaseNotes>See CHANGELOG.md for release notes</PackageReleaseNotes>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="/" />
+    <None Include="../LICENSE.txt" Pack="true" PackagePath="/" />
+  </ItemGroup>
 
 </Project>
