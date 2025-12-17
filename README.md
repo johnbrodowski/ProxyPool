@@ -94,6 +94,38 @@ string html = await proxyManager.FetchHtmlAsync("https://example.com");
 Console.WriteLine($"Successfully fetched content: {html.Length} bytes");
 ```
 
+## Testing ProxyPool
+
+Want to verify that ProxyPool is working correctly? Run the included test program:
+
+### Quick Test
+
+**Windows:**
+```bash
+run-tests.bat
+```
+
+**Linux/Mac:**
+```bash
+./run-tests.sh
+```
+
+### Manual Test
+
+```bash
+cd ProxyPool.Tests
+dotnet run
+```
+
+The test program will:
+- ✓ Download proxies from a public source
+- ✓ Test multiple proxies in parallel
+- ✓ Find working proxies
+- ✓ Fetch content through proxies
+- ✓ Display detailed statistics
+
+See [ProxyPool.Tests/README.md](ProxyPool.Tests/README.md) for more details.
+
 ## Configuration Options
 
 ### ProxyEnabledHttpClient Constructor
