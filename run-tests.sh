@@ -36,8 +36,8 @@ echo "Running Tests..."
 echo "=========================================="
 echo ""
 
-# Run the tests
-dotnet run --project ProxyPool.Tests --configuration Release
+# Run the tests with xUnit
+dotnet test ProxyPool.Tests/ProxyPool.Tests.csproj --configuration Release --logger "console;verbosity=normal"
 
 TEST_RESULT=$?
 

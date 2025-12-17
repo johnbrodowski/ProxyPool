@@ -1,37 +1,53 @@
 # ProxyPool Tests
 
-This is a test console application to verify that ProxyPool is working correctly and able to find and test proxies.
+This is an xUnit test project to verify that ProxyPool is working correctly and able to find and test proxies.
 
 ## What This Tests
 
-The test program validates:
+The test suite validates:
 
 1. **ProxyEnabledHttpClient** - Core functionality
-   - Proxy discovery from remote sources
-   - Parallel proxy testing
-   - Content fetching through working proxies
-   - Health tracking and statistics
+   - `ProxyClient_ShouldDiscoverProxies` - Proxy discovery from remote sources
+   - `ProxyClient_ShouldTrackStatistics` - Health tracking and statistics
+   - `ProxyClient_ShouldHandleMultipleRequests` - Multiple sequential requests
 
 2. **ProxyManager** - Simplified API
-   - Proxy pool initialization
-   - Automatic working proxy discovery
-   - Content fetching with managed proxies
+   - `ProxyManager_ShouldInitializeSuccessfully` - Proxy pool initialization
+   - `ProxyManager_ShouldFetchContent` - Content fetching with managed proxies
 
 ## Running the Tests
 
 ### From Visual Studio
-1. Set `ProxyPool.Tests` as the startup project
-2. Press F5 to run
+1. Open **Test Explorer** (Test > Test Explorer)
+2. Click **Run All** to run all tests
+3. View detailed output for each test
+
+### From Visual Studio Code
+1. Install the .NET Test Explorer extension
+2. Tests will appear in the Testing sidebar
+3. Click the play button to run tests
 
 ### From Command Line
+
+**Run all tests:**
 ```bash
-cd ProxyPool.Tests
-dotnet run
+dotnet test
 ```
 
-Or from the solution root:
+**Run from test project directory:**
 ```bash
-dotnet run --project ProxyPool.Tests
+cd ProxyPool.Tests
+dotnet test
+```
+
+**Run with detailed output:**
+```bash
+dotnet test --logger "console;verbosity=detailed"
+```
+
+**Run specific test:**
+```bash
+dotnet test --filter "ProxyClient_ShouldDiscoverProxies"
 ```
 
 ## Expected Output
