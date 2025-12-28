@@ -1,3 +1,6 @@
+# About this code
+This example was extracted from AGPA — my fully autonomous general-purpose agent (closed-source, ~150k LOC).
+
 # ProxyPool
 
 A high-performance .NET library for intelligent proxy management with automatic discovery, health monitoring, and smart rotation. Built for reliable web scraping and HTTP requests, ProxyPool automatically finds working proxies from public sources, tests them in parallel, tracks their reliability, and seamlessly rotates through the healthiest options—all with zero configuration required.
