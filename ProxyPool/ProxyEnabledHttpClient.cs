@@ -27,6 +27,7 @@ namespace ProxyPool
         private bool _allowDirectFallback;
         private string _userAgent;
         private int _healthCheckIntervalMinutes;
+        private static readonly string[] _blockedHosts = { "localhost", "127.0.0.1", "::1", "0.0.0.0" };
 
         #endregion Configuration Settings
 
@@ -82,7 +83,12 @@ namespace ProxyPool
             _maxRetries = Math.Max(1, maxRetries);
             _healthCheckIntervalMinutes = Math.Max(5, healthCheckIntervalMinutes);
             _allowDirectFallback = allowDirectFallback;
-            _userAgent = "Mozilla/5.0";
+            _userAgent = string.IsNullOrWhiteSpace(userAgent) ? "Mozilla/5.0" : userAgent;
+
+            if (_proxyListUrls.Any(url => !TryValidateTargetUri(url, out _)))
+            {
+                throw new ArgumentException("All proxy list URLs must be valid absolute HTTP/HTTPS URLs.", nameof(proxyListUrls));
+            }
 
             // Set up direct client with compression support
             _directClient = new HttpClient(new HttpClientHandler
@@ -114,6 +120,16 @@ namespace ProxyPool
             if (string.IsNullOrEmpty(url))
             {
                 throw new ArgumentException("URL cannot be null or empty", nameof(url));
+            }
+
+            if (!TryValidateTargetUri(url, out var targetUri))
+            {
+                throw new ArgumentException("URL must be a valid absolute HTTP/HTTPS URL.", nameof(url));
+            }
+
+            if (IsBlockedHost(targetUri.Host))
+            {
+                throw new ArgumentException("Target URL host is blocked by security policy.", nameof(url));
             }
 
             Stopwatch stopwatch = Stopwatch.StartNew();
@@ -920,6 +936,16 @@ namespace ProxyPool
         private async Task<List<string>> FetchAllProxyListsAsync(CancellationToken cancellationToken)
         {
             var allProxies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var validSourceUrls = _proxyListUrls
+                .Where(url => TryValidateTargetUri(url, out var uri) && !IsBlockedHost(uri.Host))
+                .ToList();
+
+            if (validSourceUrls.Count == 0)
+            {
+                LogWarning("No valid proxy list URLs are available after validation.");
+                return allProxies.ToList();
+            }
+
             var client = new HttpClient
             {
                 Timeout = TimeSpan.FromSeconds(10)
@@ -929,7 +955,7 @@ namespace ProxyPool
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
 
             // Create tasks to fetch from all sources in parallel
-            var fetchTasks = _proxyListUrls.Select(url => Task.Run(async () =>
+            var fetchTasks = validSourceUrls.Select(url => Task.Run(async () =>
             {
                 try
                 {
@@ -970,6 +996,72 @@ namespace ProxyPool
             }
 
             return allProxies.ToList();
+        }
+
+        private static bool TryValidateTargetUri(string url, out Uri uri)
+        {
+            uri = null;
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed))
+            {
+                return false;
+            }
+
+            if (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps)
+            {
+                return false;
+            }
+
+            uri = parsed;
+            return true;
+        }
+
+        private static bool IsBlockedHost(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host))
+            {
+                return true;
+            }
+
+            if (_blockedHosts.Contains(host, StringComparer.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (!IPAddress.TryParse(host, out var ip))
+            {
+                return false;
+            }
+
+            if (IPAddress.IsLoopback(ip))
+            {
+                return true;
+            }
+
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                byte[] bytes = ip.GetAddressBytes();
+                if (bytes[0] == 10)
+                {
+                    return true;
+                }
+
+                if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)
+                {
+                    return true;
+                }
+
+                if (bytes[0] == 192 && bytes[1] == 168)
+                {
+                    return true;
+                }
+            }
+
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && ip.IsIPv6LinkLocal)
+            {
+                return true;
+            }
+
+            return false;
         }
 
         #region Supporting Classes
