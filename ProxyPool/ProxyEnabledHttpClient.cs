@@ -54,9 +54,9 @@ namespace ProxyPool
         /// <param name="fetchTimeoutSeconds">Timeout for fetch operations in seconds</param>
         /// <param name="maxParallelTests">Maximum number of parallel proxy tests</param>
         /// <param name="maxRetries">Maximum number of retries per proxy</param>
-        /// <param name="healthCheckIntervalMinutes">Interval for proxy health checks in minutes</param>
         /// <param name="allowDirectFallback">Whether to allow direct connection if all proxies fail</param>
         /// <param name="userAgent">User agent string to use for requests</param>
+        /// <param name="healthCheckIntervalMinutes">Interval for proxy health checks in minutes</param>
         public ProxyEnabledHttpClient(
             IEnumerable<string> proxyListUrls,
             int testTimeoutSeconds,
@@ -65,7 +65,8 @@ namespace ProxyPool
             int maxRetries = 3,
             int healthCheckIntervalMinutes = 30,
             bool allowDirectFallback = false,
-            string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+            string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            int healthCheckIntervalMinutes = 30)
         {
             // Validate inputs
             _proxyListUrls = proxyListUrls ?? throw new ArgumentNullException(nameof(proxyListUrls));
@@ -672,7 +673,9 @@ namespace ProxyPool
                     {
                         Address = proxyAddress,
                         Host = uri.Host,
-                        Port = uri.IsDefaultPort ? 80 : uri.Port,
+                        Port = uri.IsDefaultPort
+                            ? (proxyType == ProxyType.Https ? 443 : 80)
+                            : uri.Port,
                         Type = proxyType,
                         Username = username,
                         Password = password
