@@ -44,10 +44,52 @@ namespace ProxyPool.Demo
             Console.WriteLine("DEMO 1: ProxyEnabledHttpClient - Core API");
             Console.WriteLine("---------------------------------------------");
 
-            var proxyListUrls = new List<string>
+            List<string> proxyListUrls = new List<string>
             {
-                "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt"
+                 // "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/refs/heads/master/socks4.txt",
+                // "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/refs/heads/master/socks5.txt",
+
+               //   "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/refs/heads/main/socks5.txt" // OK
+             //  "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/refs/heads/main/socks4.txt",
+
+                //  "https://raw.githubusercontent.com/roosterkid/openproxylist/refs/heads/main/SOCKS4_RAW.txt",
+                // "https://raw.githubusercontent.com/roosterkid/openproxylist/refs/heads/main/SOCKS5_RAW.txt",
+
+                // "https://raw.githubusercontent.com/SoliSpirit/proxy-list/refs/heads/main/socks4.txt",
+                // "https://raw.githubusercontent.com/SoliSpirit/proxy-list/refs/heads/main/socks5.txt",
+
+                // "https://raw.githubusercontent.com/TuanMinPay/live-proxy/refs/heads/master/socks4.txt",
+                // "https://raw.githubusercontent.com/TuanMinPay/live-proxy/refs/heads/master/socks5.txt",
+
+               //  "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/refs/heads/main/socks4.txt"
+              //   "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/refs/heads/main/socks5.txt" ,
+
+               //  "https://raw.githubusercontent.com/monosans/proxy-list/refs/heads/main/proxies/socks4.txt"
+              //  "https://raw.githubusercontent.com/monosans/proxy-list/refs/heads/main/proxies/socks5.txt"
+
+                 // "https://raw.githubusercontent.com/monosans/proxy-list/refs/heads/main/proxies_anonymous/socks4.txt"
+                // "https://raw.githubusercontent.com/monosans/proxy-list/refs/heads/main/proxies_anonymous/socks5.txt"
+
+                // "https://raw.githubusercontent.com/r00tee/Proxy-List/refs/heads/main/Socks4.txt"
+                // "https://raw.githubusercontent.com/r00tee/Proxy-List/refs/heads/main/Socks5.txt"
+
+              //  "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"
+
+                // "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/refs/heads/master/socks4.txt"
+                //  "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/refs/heads/master/socks5.txt"
+
+                "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/refs/heads/main/proxies/socks4.txt"
+                // "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/refs/heads/main/proxies/socks5.txt"
+
+                // "https://raw.githubusercontent.com/mmpx12/proxy-list/refs/heads/master/socks4.txt"
+                // "https://raw.githubusercontent.com/mmpx12/proxy-list/refs/heads/master/socks5.txt"
             };
+
+
+            //var proxyListUrls = new List<string>
+            //{
+            //    "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt"
+            //};
 
             Console.WriteLine($"✓ Using proxy source: {proxyListUrls[0]}");
             Console.WriteLine("\nInitializing ProxyEnabledHttpClient...");

@@ -27,6 +27,7 @@ namespace ProxyPool
         private bool _allowDirectFallback;
         private string _userAgent;
         private int _healthCheckIntervalMinutes;
+        private static readonly string[] _blockedHosts = { "localhost", "127.0.0.1", "::1", "0.0.0.0" };
 
         #endregion Configuration Settings
 
@@ -36,8 +37,12 @@ namespace ProxyPool
         private readonly SemaphoreSlim _initLock = new SemaphoreSlim(1, 1);
         private readonly HttpClient _directClient;
         private Timer _healthCheckTimer;
+        private CancellationTokenSource _healthCheckCancellationTokenSource;
+        private Task _healthCheckTask;
         private bool _isInitialized;
         private bool _isDisposed;
+        private int _isDisposing;
+        private int _isHealthCheckRunning;
         private readonly string[] _testUrls = { "https://html.duckduckgo.com/html/", "https://duckduckgo.com/" };
 
         #endregion Internal State
@@ -52,9 +57,9 @@ namespace ProxyPool
         /// <param name="fetchTimeoutSeconds">Timeout for fetch operations in seconds</param>
         /// <param name="maxParallelTests">Maximum number of parallel proxy tests</param>
         /// <param name="maxRetries">Maximum number of retries per proxy</param>
-        /// <param name="healthCheckIntervalMinutes">Interval for proxy health checks in minutes</param>
         /// <param name="allowDirectFallback">Whether to allow direct connection if all proxies fail</param>
         /// <param name="userAgent">User agent string to use for requests</param>
+        /// <param name="healthCheckIntervalMinutes">Interval for proxy health checks in minutes</param>
         public ProxyEnabledHttpClient(
             IEnumerable<string> proxyListUrls,
             int testTimeoutSeconds,
@@ -62,11 +67,9 @@ namespace ProxyPool
             int maxParallelTests,
             int maxRetries = 3,
             bool allowDirectFallback = false,
-            string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+            string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            int healthCheckIntervalMinutes = 30)
         {
-            int healthCheckIntervalMinutes = 30;
-
-
             // Validate inputs
             _proxyListUrls = proxyListUrls ?? throw new ArgumentNullException(nameof(proxyListUrls));
             if (!_proxyListUrls.Any())
@@ -78,11 +81,18 @@ namespace ProxyPool
             // Store configuration
             _testTimeoutSeconds = Math.Max(1, testTimeoutSeconds);
             _fetchTimeoutSeconds = Math.Max(5, fetchTimeoutSeconds);
-            _maxParallelTests = Math.Max(1, Math.Min(500, maxParallelTests)); // Limit between 1 and 50
+            _maxParallelTests = Math.Max(1, Math.Min(500, maxParallelTests)); // Limit between 1 and 500
             _maxRetries = Math.Max(1, maxRetries);
             _healthCheckIntervalMinutes = Math.Max(5, healthCheckIntervalMinutes);
             _allowDirectFallback = allowDirectFallback;
-            _userAgent = "Mozilla/5.0";
+            _userAgent = string.IsNullOrWhiteSpace(userAgent)
+                ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                : userAgent;
+
+            if (_proxyListUrls.Any(url => !TryValidateTargetUri(url, out _)))
+            {
+                throw new ArgumentException("All proxy list URLs must be valid absolute HTTP/HTTPS URLs.", nameof(proxyListUrls));
+            }
 
             // Set up direct client with compression support
             _directClient = new HttpClient(new HttpClientHandler
@@ -97,6 +107,7 @@ namespace ProxyPool
                 null,
                 TimeSpan.FromMinutes(_healthCheckIntervalMinutes),
                 TimeSpan.FromMinutes(_healthCheckIntervalMinutes));
+            _healthCheckCancellationTokenSource = new CancellationTokenSource();
         }
 
         #endregion Constructor
@@ -114,6 +125,16 @@ namespace ProxyPool
             if (string.IsNullOrEmpty(url))
             {
                 throw new ArgumentException("URL cannot be null or empty", nameof(url));
+            }
+
+            if (!TryValidateTargetUri(url, out var targetUri))
+            {
+                throw new ArgumentException("URL must be a valid absolute HTTP/HTTPS URL.", nameof(url));
+            }
+
+            if (IsBlockedHost(targetUri.Host))
+            {
+                throw new ArgumentException("Target URL host is blocked by security policy.", nameof(url));
             }
 
             Stopwatch stopwatch = Stopwatch.StartNew();
@@ -170,12 +191,16 @@ namespace ProxyPool
         /// <returns>ProxyPoolStatistics object with current stats</returns>
         public ProxyPoolStatistics GetStatistics()
         {
+            var snapshots = _proxyPool.Values
+                .Select(p => p.GetSnapshot())
+                .ToList();
+
             var stats = new ProxyPoolStatistics
             {
-                TotalProxies = _proxyPool.Count,
-                HealthyProxies = _proxyPool.Values.Count(p => p.IsHealthy),
+                TotalProxies = snapshots.Count,
+                HealthyProxies = snapshots.Count(p => p.IsHealthy),
                 IsInitialized = _isInitialized,
-                TopProxies = _proxyPool.Values
+                TopProxies = snapshots
                     .OrderByDescending(p => p.ReliabilityScore)
                     .ThenBy(p => p.AverageResponseTime)
                     .Take(10)
@@ -203,10 +228,12 @@ namespace ProxyPool
         {
             // Get healthy proxies sorted by reliability
             var healthyProxies = _proxyPool.Values
-                .Where(p => p.IsHealthy)
-                .OrderByDescending(p => p.ReliabilityScore)
-                .ThenBy(p => p.AverageResponseTime)
+                .Select(p => new { Proxy = p, Snapshot = p.GetSnapshot() })
+                .Where(x => x.Snapshot.IsHealthy)
+                .OrderByDescending(x => x.Snapshot.ReliabilityScore)
+                .ThenBy(x => x.Snapshot.AverageResponseTime)
                 .Take(5)
+                .Select(x => x.Proxy)
                 .ToList();
 
             // Try each healthy proxy
@@ -249,8 +276,9 @@ namespace ProxyPool
                 {
                     // Use untested proxies or those that haven't failed too many times
                     proxyAddresses = _proxyPool.Values
-                        .Where(p => !p.IsHealthy && p.FailureCount < 3)
-                        .Select(p => p.Address)
+                        .Select(p => p.GetSnapshot())
+                        .Where(s => !s.IsHealthy && s.FailureCount < 3)
+                        .Select(s => s.Address)
                         .ToList();
 
 
@@ -273,8 +301,8 @@ namespace ProxyPool
                 var workingProxy = await FindBestWorkingProxyAsync(
                     proxyAddresses,
                     cancellationToken,
-                    minProxiesToCheck: 50,  // Check at least 1000 proxies
-                    maxTimeSeconds: 240       // Spend at most 60 seconds checking
+                    minProxiesToCheck: 50,  // Check at least 50 proxies
+                    maxTimeSeconds: 240       // Spend at most 240 seconds checking
                 );
 
                 if (workingProxy != null)
@@ -336,6 +364,9 @@ namespace ProxyPool
 
             foreach (string address in proxyAddresses)
             {
+                ProxyInfo parsedProxy = ParseProxy(address);
+                string proxyKey = parsedProxy.Address;
+
                 // Stop if operation was canceled or we've timed out
                 if (linkedCts.Token.IsCancellationRequested || stopwatch.Elapsed.TotalSeconds > maxTimeSeconds)
                 {
@@ -351,19 +382,19 @@ namespace ProxyPool
                 }
 
                 // Skip if we already have this proxy in our pool and it's marked as unhealthy
-                if (_proxyPool.TryGetValue(address, out var existingProxy) && !existingProxy.IsHealthy)
+                if (_proxyPool.TryGetValue(proxyKey, out var existingProxy) && !existingProxy.GetSnapshot().IsHealthy)
                 {
                     continue;
                 }
 
                 // Skip if we've already tried this proxy in this session
-                if (triedProxies.Contains(address))
+                if (triedProxies.Contains(proxyKey))
                 {
                     continue;
                 }
 
                 proxiesStartedChecking++;
-                triedProxies.Add(address);
+                triedProxies.Add(proxyKey);
 
                 // Wait for a slot in the semaphore
                 try
@@ -386,7 +417,7 @@ namespace ProxyPool
                             return;
                         }
 
-                        ProxyInfo proxyInfo = ParseProxy(address);
+                        ProxyInfo proxyInfo = parsedProxy;
                         bool isWorking = false;
 
                         // Try with multiple test URLs
@@ -421,7 +452,7 @@ namespace ProxyPool
                         if (isWorking)
                         {
                             proxyInfo.RecordSuccess();
-                            _proxyPool.AddOrUpdate(address, proxyInfo, (key, old) =>
+                            _proxyPool.AddOrUpdate(proxyInfo.Address, proxyInfo, (key, old) =>
                             {
                                 old.RecordSuccess();
                                 return old;
@@ -441,7 +472,7 @@ namespace ProxyPool
                         {
                             // Add to pool as unhealthy to avoid rechecking
                             proxyInfo.RecordFailure();
-                            _proxyPool.AddOrUpdate(address, proxyInfo, (key, old) =>
+                            _proxyPool.AddOrUpdate(proxyInfo.Address, proxyInfo, (key, old) =>
                             {
                                 old.RecordFailure();
                                 return old;
@@ -615,71 +646,93 @@ namespace ProxyPool
 
         private ProxyInfo ParseProxy(string proxyAddress)
         {
-            // Initialize defaults
-            string host = proxyAddress;
-            int port = 80;
-            ProxyType proxyType = ProxyType.Http;
-            string username = null;
-            string password = null;
+            string normalizedAddress = proxyAddress?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(normalizedAddress))
+            {
+                return new ProxyInfo { Address = proxyAddress };
+            }
 
             try
             {
-                // Handle authentication format: username:password@host:port
-                if (host.Contains('@'))
+                string candidate = normalizedAddress;
+                if (!candidate.Contains("://", StringComparison.Ordinal))
                 {
-                    string[] authParts = host.Split('@');
-                    if (authParts.Length == 2)
+                    candidate = $"http://{candidate}";
+                }
+
+                if (Uri.TryCreate(candidate, UriKind.Absolute, out var uri) && !string.IsNullOrWhiteSpace(uri.Host))
+                {
+                    string scheme = uri.Scheme.ToLowerInvariant();
+                    ProxyType proxyType = scheme switch
                     {
-                        string[] credentials = authParts[0].Split(':');
-                        if (credentials.Length == 2)
+                        "https" => ProxyType.Https,
+                        "socks4" => ProxyType.Socks4,
+                        "socks5" => ProxyType.Socks5,
+                        _ => ProxyType.Http
+                    };
+
+                    string username = null;
+                    string password = null;
+                    if (!string.IsNullOrEmpty(uri.UserInfo))
+                    {
+                        var credentials = uri.UserInfo.Split(':', 2);
+                        username = Uri.UnescapeDataString(credentials[0]);
+                        if (credentials.Length > 1)
                         {
-                            username = credentials[0];
-                            password = credentials[1];
+                            password = Uri.UnescapeDataString(credentials[1]);
                         }
-                        host = authParts[1];
                     }
-                }
 
-                // Parse host:port format
-                string[] parts = host.Split(':');
-                if (parts.Length >= 2)
-                {
-                    host = parts[0];
-                    if (int.TryParse(parts[1], out int parsedPort))
+                    return new ProxyInfo
                     {
-                        port = parsedPort;
-                    }
-                }
-
-                // Determine proxy type from address if specified
-                if (proxyAddress.Contains("socks5", StringComparison.OrdinalIgnoreCase))
-                {
-                    proxyType = ProxyType.Socks5;
-                }
-                else if (proxyAddress.Contains("socks4", StringComparison.OrdinalIgnoreCase))
-                {
-                    proxyType = ProxyType.Socks4;
-                }
-                else if (proxyAddress.Contains("https", StringComparison.OrdinalIgnoreCase))
-                {
-                    proxyType = ProxyType.Https;
+                        Address = BuildCanonicalProxyAddress(uri, proxyType),
+                        Host = uri.Host,
+                        Port = uri.IsDefaultPort
+                            ? (proxyType == ProxyType.Https ? 443 : 80)
+                            : uri.Port,
+                        Type = proxyType,
+                        Username = username,
+                        Password = password
+                    };
                 }
             }
             catch (Exception ex)
             {
                 LogDebug($"Error parsing proxy address {proxyAddress}: {ex.Message}");
-                // Use defaults if parsing fails
+            }
+
+            if (Uri.CheckHostName(normalizedAddress) != UriHostNameType.Unknown)
+            {
+                return new ProxyInfo
+                {
+                    Address = $"http://{normalizedAddress.ToLowerInvariant()}:80",
+                    Host = normalizedAddress,
+                    Port = 80,
+                    Type = ProxyType.Http
+                };
             }
 
             return new ProxyInfo
             {
-                Address = proxyAddress,
-                Host = host,
-                Port = port,
-                Type = proxyType,
-                Username = username,
-                Password = password
+                Address = normalizedAddress,
+                Host = normalizedAddress,
+                Port = 80,
+                Type = ProxyType.Http
             };
+        }
+
+        private static string BuildCanonicalProxyAddress(Uri uri, ProxyType proxyType)
+        {
+            string scheme = proxyType == ProxyType.Socks5 ? "socks5" :
+                            proxyType == ProxyType.Socks4 ? "socks4" :
+                            proxyType == ProxyType.Https ? "https" : "http";
+
+            string defaultPort = proxyType == ProxyType.Https ? "443" : "80";
+            string host = uri.IdnHost.Contains(':') ? $"[{uri.IdnHost.ToLowerInvariant()}]" : uri.IdnHost.ToLowerInvariant();
+            string port = uri.IsDefaultPort ? defaultPort : uri.Port.ToString();
+            string userInfo = string.IsNullOrEmpty(uri.UserInfo) ? string.Empty : $"{uri.UserInfo}@";
+
+            return $"{scheme}://{userInfo}{host}:{port}";
         }
 
         private async Task<string> FetchWithDirectConnectionAsync(string url, CancellationToken cancellationToken)
@@ -726,7 +779,10 @@ namespace ProxyPool
                 return client;
             }
 
-            var webProxy = new WebProxy(proxy.Host, proxy.Port);
+            string scheme = proxy.Type == ProxyType.Socks5 ? "socks5" :
+                            proxy.Type == ProxyType.Socks4 ? "socks4" :
+                            proxy.Type == ProxyType.Https ? "https" : "http";
+            var webProxy = new WebProxy($"{scheme}://{proxy.Host}:{proxy.Port}");
 
             if (!string.IsNullOrEmpty(proxy.Username) && !string.IsNullOrEmpty(proxy.Password))
             {
@@ -754,22 +810,36 @@ namespace ProxyPool
 
         private void PerformHealthCheck(object state)
         {
+            if (_isDisposed || Volatile.Read(ref _isDisposing) == 1)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref _isHealthCheckRunning, 1, 0) != 0)
+            {
+                LogDebug("Skipping periodic proxy health check because a previous run is still active");
+                return;
+            }
+
             // We can't use async directly in the timer callback, so we'll start a task
-            Task.Run(async () =>
+            _healthCheckTask = Task.Run(async () =>
             {
                 try
                 {
                     LogDebug("Starting periodic proxy health check");
 
-                    int healthyBefore = _proxyPool.Values.Count(p => p.IsHealthy);
+                    var healthCheckToken = _healthCheckCancellationTokenSource.Token;
+                    int healthyBefore = _proxyPool.Values.Count(p => p.GetSnapshot().IsHealthy);
 
                     // Focus health checks on proxies that need verification
                     var proxiesToCheck = _proxyPool.Values
-                        .Where(p =>
+                        .Select(p => new { Proxy = p, Snapshot = p.GetSnapshot() })
+                        .Where(x =>
                             // Proxies not checked recently
-                            (DateTime.UtcNow - p.LastChecked) > TimeSpan.FromMinutes(30) ||
+                            (DateTime.UtcNow - x.Snapshot.LastChecked) > TimeSpan.FromMinutes(30) ||
                             // Unhealthy proxies that might have recovered
-                            (!p.IsHealthy && p.FailureCount < 5))
+                            (!x.Snapshot.IsHealthy && x.Snapshot.FailureCount < 5))
+                        .Select(x => x.Proxy)
                         .ToList();
 
                     // Use a semaphore to limit concurrent health checks
@@ -778,7 +848,7 @@ namespace ProxyPool
 
                     foreach (var proxy in proxiesToCheck)
                     {
-                        await semaphore.WaitAsync();
+                        await semaphore.WaitAsync(healthCheckToken);
 
                         tasks.Add(Task.Run(async () =>
                         {
@@ -787,7 +857,8 @@ namespace ProxyPool
                                 foreach (var testUrl in _testUrls)
                                 {
                                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(_testTimeoutSeconds));
-                                    bool isWorking = await TestProxyAsync(proxy, testUrl, cts.Token);
+                                    using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, healthCheckToken);
+                                    bool isWorking = await TestProxyAsync(proxy, testUrl, linkedCts.Token);
                                     if (isWorking)
                                     {
                                         proxy.RecordSuccess();
@@ -801,6 +872,10 @@ namespace ProxyPool
                                     }
                                 }
                             }
+                            catch (OperationCanceledException)
+                            {
+                                LogDebug($"Health check canceled for {proxy.Address}");
+                            }
                             catch (Exception ex)
                             {
                                 LogDebug($"Error during health check for {proxy.Address}: {ex.Message}");
@@ -810,7 +885,7 @@ namespace ProxyPool
                             {
                                 semaphore.Release();
                             }
-                        }));
+                        }, healthCheckToken));
                     }
 
                     // Wait for all health check tasks to complete with a timeout
@@ -818,7 +893,7 @@ namespace ProxyPool
                     {
                         await Task.WhenAny(
                             Task.WhenAll(tasks),
-                            Task.Delay(TimeSpan.FromMinutes(5))
+                            Task.Delay(TimeSpan.FromMinutes(5), healthCheckToken)
                         );
                     }
                     catch (Exception ex)
@@ -829,12 +904,20 @@ namespace ProxyPool
                     // Clean up permanently failed proxies
                     RemoveFailedProxies();
 
-                    int healthyAfter = _proxyPool.Values.Count(p => p.IsHealthy);
+                    int healthyAfter = _proxyPool.Values.Count(p => p.GetSnapshot().IsHealthy);
                     LogDebug($"Health check completed. Healthy proxies: {healthyBefore} -> {healthyAfter}");
+                }
+                catch (OperationCanceledException)
+                {
+                    LogDebug("Periodic proxy health check canceled");
                 }
                 catch (Exception ex)
                 {
                     LogError($"Error in proxy health check: {ex.Message}");
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _isHealthCheckRunning, 0);
                 }
             });
         }
@@ -843,9 +926,12 @@ namespace ProxyPool
         {
             // Remove proxies with excessive failures and low reliability
             var failedProxies = _proxyPool.Where(kv =>
-                    kv.Value.FailureCount > 10 &&
-                    kv.Value.ReliabilityScore < 0.1 &&
-                    (DateTime.UtcNow - kv.Value.LastSuccess) > TimeSpan.FromHours(1))
+                {
+                    var snapshot = kv.Value.GetSnapshot();
+                    return snapshot.FailureCount > 10 &&
+                        snapshot.ReliabilityScore < 0.1 &&
+                        (DateTime.UtcNow - snapshot.LastSuccess) > TimeSpan.FromHours(1);
+                })
                 .Select(kv => kv.Key)
                 .ToList();
 
@@ -904,9 +990,23 @@ namespace ProxyPool
 
             if (disposing)
             {
+                Interlocked.Exchange(ref _isDisposing, 1);
+                _healthCheckTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+                _healthCheckCancellationTokenSource?.Cancel();
+
+                try
+                {
+                    _healthCheckTask?.Wait(TimeSpan.FromSeconds(5));
+                }
+                catch (AggregateException ex) when (ex.InnerExceptions.All(e => e is OperationCanceledException))
+                {
+                    // Ignore expected cancellation
+                }
+
                 _initLock?.Dispose();
                 _directClient?.Dispose();
                 _healthCheckTimer?.Dispose();
+                _healthCheckCancellationTokenSource?.Dispose();
             }
 
             _isDisposed = true;
@@ -920,6 +1020,16 @@ namespace ProxyPool
         private async Task<List<string>> FetchAllProxyListsAsync(CancellationToken cancellationToken)
         {
             var allProxies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var validSourceUrls = _proxyListUrls
+                .Where(url => TryValidateTargetUri(url, out var uri) && !IsBlockedHost(uri.Host))
+                .ToList();
+
+            if (validSourceUrls.Count == 0)
+            {
+                LogWarning("No valid proxy list URLs are available after validation.");
+                return allProxies.ToList();
+            }
+
             var client = new HttpClient
             {
                 Timeout = TimeSpan.FromSeconds(10)
@@ -929,7 +1039,7 @@ namespace ProxyPool
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
 
             // Create tasks to fetch from all sources in parallel
-            var fetchTasks = _proxyListUrls.Select(url => Task.Run(async () =>
+            var fetchTasks = validSourceUrls.Select(url => Task.Run(async () =>
             {
                 try
                 {
@@ -972,6 +1082,72 @@ namespace ProxyPool
             return allProxies.ToList();
         }
 
+        private static bool TryValidateTargetUri(string url, out Uri uri)
+        {
+            uri = null;
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed))
+            {
+                return false;
+            }
+
+            if (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps)
+            {
+                return false;
+            }
+
+            uri = parsed;
+            return true;
+        }
+
+        private static bool IsBlockedHost(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host))
+            {
+                return true;
+            }
+
+            if (_blockedHosts.Contains(host, StringComparer.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (!IPAddress.TryParse(host, out var ip))
+            {
+                return false;
+            }
+
+            if (IPAddress.IsLoopback(ip))
+            {
+                return true;
+            }
+
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                byte[] bytes = ip.GetAddressBytes();
+                if (bytes[0] == 10)
+                {
+                    return true;
+                }
+
+                if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)
+                {
+                    return true;
+                }
+
+                if (bytes[0] == 192 && bytes[1] == 168)
+                {
+                    return true;
+                }
+            }
+
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && ip.IsIPv6LinkLocal)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
         #region Supporting Classes
 
         /// <summary>
@@ -992,40 +1168,96 @@ namespace ProxyPool
             public DateTime LastSuccess { get; set; } = DateTime.UtcNow;
             public TimeSpan AverageResponseTime { get; set; } = TimeSpan.FromSeconds(1);
             private readonly Queue<TimeSpan> _responseTimes = new Queue<TimeSpan>(10); // Track last 10 response times
+            private readonly object _sync = new object();
 
-            public bool IsHealthy => FailureCount < 3 && ReliabilityScore > 0.3;
+            public bool IsHealthy
+            {
+                get
+                {
+                    lock (_sync)
+                    {
+                        return FailureCount < 3 && ReliabilityScore > 0.3;
+                    }
+                }
+            }
+
+            public ProxyInfoSnapshot GetSnapshot()
+            {
+                lock (_sync)
+                {
+                    return new ProxyInfoSnapshot
+                    {
+                        Address = Address,
+                        Host = Host,
+                        Port = Port,
+                        Type = Type,
+                        Username = Username,
+                        Password = Password,
+                        ReliabilityScore = ReliabilityScore,
+                        FailureCount = FailureCount,
+                        SuccessCount = SuccessCount,
+                        LastChecked = LastChecked,
+                        LastSuccess = LastSuccess,
+                        AverageResponseTime = AverageResponseTime,
+                        IsHealthy = FailureCount < 3 && ReliabilityScore > 0.3
+                    };
+                }
+            }
 
             public void RecordSuccess(TimeSpan? responseTime = null)
             {
-                SuccessCount++;
-                FailureCount = Math.Max(0, FailureCount - 1); // Reduce failure count on success
-                ReliabilityScore = Math.Min(1.0, ReliabilityScore + 0.1);
-                LastChecked = DateTime.UtcNow;
-                LastSuccess = DateTime.UtcNow;
-
-                if (responseTime.HasValue)
+                lock (_sync)
                 {
-                    // Update average response time
-                    _responseTimes.Enqueue(responseTime.Value);
-                    if (_responseTimes.Count > 10)
-                    {
-                        _responseTimes.Dequeue();
-                    }
+                    SuccessCount++;
+                    FailureCount = Math.Max(0, FailureCount - 1); // Reduce failure count on success
+                    ReliabilityScore = Math.Min(1.0, ReliabilityScore + 0.1);
+                    LastChecked = DateTime.UtcNow;
+                    LastSuccess = DateTime.UtcNow;
 
-                    if (_responseTimes.Count > 0)
+                    if (responseTime.HasValue)
                     {
-                        AverageResponseTime = TimeSpan.FromMilliseconds(
-                            _responseTimes.Average(t => t.TotalMilliseconds));
+                        // Update average response time
+                        _responseTimes.Enqueue(responseTime.Value);
+                        if (_responseTimes.Count > 10)
+                        {
+                            _responseTimes.Dequeue();
+                        }
+
+                        if (_responseTimes.Count > 0)
+                        {
+                            AverageResponseTime = TimeSpan.FromMilliseconds(
+                                _responseTimes.Average(t => t.TotalMilliseconds));
+                        }
                     }
                 }
             }
 
             public void RecordFailure()
             {
-                FailureCount++;
-                ReliabilityScore = Math.Max(0.0, ReliabilityScore - 0.2);
-                LastChecked = DateTime.UtcNow;
+                lock (_sync)
+                {
+                    FailureCount++;
+                    ReliabilityScore = Math.Max(0.0, ReliabilityScore - 0.2);
+                    LastChecked = DateTime.UtcNow;
+                }
             }
+        }
+
+        public class ProxyInfoSnapshot
+        {
+            public string Address { get; set; }
+            public string Host { get; set; }
+            public int Port { get; set; }
+            public ProxyType Type { get; set; }
+            public string Username { get; set; }
+            public string Password { get; set; }
+            public double ReliabilityScore { get; set; }
+            public int FailureCount { get; set; }
+            public int SuccessCount { get; set; }
+            public DateTime LastChecked { get; set; }
+            public DateTime LastSuccess { get; set; }
+            public TimeSpan AverageResponseTime { get; set; }
+            public bool IsHealthy { get; set; }
         }
 
         /// <summary>
