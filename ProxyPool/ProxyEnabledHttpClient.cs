@@ -27,6 +27,7 @@ namespace ProxyPool
         private bool _allowDirectFallback;
         private string _userAgent;
         private int _healthCheckIntervalMinutes;
+        private static readonly string[] _blockedHosts = { "localhost", "127.0.0.1", "::1", "0.0.0.0" };
 
         #endregion Configuration Settings
 
@@ -38,6 +39,7 @@ namespace ProxyPool
         private Timer _healthCheckTimer;
         private bool _isInitialized;
         private bool _isDisposed;
+        private int _healthCheckRunning;
         private readonly string[] _testUrls = { "https://html.duckduckgo.com/html/", "https://duckduckgo.com/" };
 
         #endregion Internal State
@@ -52,7 +54,6 @@ namespace ProxyPool
         /// <param name="fetchTimeoutSeconds">Timeout for fetch operations in seconds</param>
         /// <param name="maxParallelTests">Maximum number of parallel proxy tests</param>
         /// <param name="maxRetries">Maximum number of retries per proxy</param>
-        /// <param name="healthCheckIntervalMinutes">Interval for proxy health checks in minutes</param>
         /// <param name="allowDirectFallback">Whether to allow direct connection if all proxies fail</param>
         /// <param name="userAgent">User agent string to use for requests</param>
         public ProxyEnabledHttpClient(
@@ -78,11 +79,16 @@ namespace ProxyPool
             // Store configuration
             _testTimeoutSeconds = Math.Max(1, testTimeoutSeconds);
             _fetchTimeoutSeconds = Math.Max(5, fetchTimeoutSeconds);
-            _maxParallelTests = Math.Max(1, Math.Min(500, maxParallelTests)); // Limit between 1 and 50
+            _maxParallelTests = Math.Max(1, Math.Min(500, maxParallelTests)); // Limit between 1 and 500
             _maxRetries = Math.Max(1, maxRetries);
             _healthCheckIntervalMinutes = Math.Max(5, healthCheckIntervalMinutes);
             _allowDirectFallback = allowDirectFallback;
-            _userAgent = "Mozilla/5.0";
+            _userAgent = string.IsNullOrWhiteSpace(userAgent) ? "Mozilla/5.0" : userAgent;
+
+            if (_proxyListUrls.Any(url => !TryValidateTargetUri(url, out _)))
+            {
+                throw new ArgumentException("All proxy list URLs must be valid absolute HTTP/HTTPS URLs.", nameof(proxyListUrls));
+            }
 
             // Set up direct client with compression support
             _directClient = new HttpClient(new HttpClientHandler
@@ -114,6 +120,16 @@ namespace ProxyPool
             if (string.IsNullOrEmpty(url))
             {
                 throw new ArgumentException("URL cannot be null or empty", nameof(url));
+            }
+
+            if (!TryValidateTargetUri(url, out var targetUri))
+            {
+                throw new ArgumentException("URL must be a valid absolute HTTP/HTTPS URL.", nameof(url));
+            }
+
+            if (IsBlockedHost(targetUri.Host))
+            {
+                throw new ArgumentException("Target URL host is blocked by security policy.", nameof(url));
             }
 
             Stopwatch stopwatch = Stopwatch.StartNew();
@@ -754,6 +770,12 @@ namespace ProxyPool
 
         private void PerformHealthCheck(object state)
         {
+            if (Interlocked.Exchange(ref _healthCheckRunning, 1) == 1)
+            {
+                LogDebug("Skipping health check because a previous run is still in progress");
+                return;
+            }
+
             // We can't use async directly in the timer callback, so we'll start a task
             Task.Run(async () =>
             {
@@ -835,6 +857,10 @@ namespace ProxyPool
                 catch (Exception ex)
                 {
                     LogError($"Error in proxy health check: {ex.Message}");
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _healthCheckRunning, 0);
                 }
             });
         }
@@ -920,7 +946,17 @@ namespace ProxyPool
         private async Task<List<string>> FetchAllProxyListsAsync(CancellationToken cancellationToken)
         {
             var allProxies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var client = new HttpClient
+            var validSourceUrls = _proxyListUrls
+                .Where(url => TryValidateTargetUri(url, out _))
+                .ToList();
+
+            if (validSourceUrls.Count == 0)
+            {
+                LogWarning("No valid proxy list URLs are available after validation.");
+                return allProxies.ToList();
+            }
+
+            using var client = new HttpClient
             {
                 Timeout = TimeSpan.FromSeconds(10)
             };
@@ -929,7 +965,7 @@ namespace ProxyPool
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36");
 
             // Create tasks to fetch from all sources in parallel
-            var fetchTasks = _proxyListUrls.Select(url => Task.Run(async () =>
+            var fetchTasks = validSourceUrls.Select(url => Task.Run(async () =>
             {
                 try
                 {
@@ -970,6 +1006,72 @@ namespace ProxyPool
             }
 
             return allProxies.ToList();
+        }
+
+        private static bool TryValidateTargetUri(string url, out Uri uri)
+        {
+            uri = null;
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed))
+            {
+                return false;
+            }
+
+            if (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps)
+            {
+                return false;
+            }
+
+            uri = parsed;
+            return true;
+        }
+
+        private static bool IsBlockedHost(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host))
+            {
+                return true;
+            }
+
+            if (_blockedHosts.Contains(host, StringComparer.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (!IPAddress.TryParse(host, out var ip))
+            {
+                return false;
+            }
+
+            if (IPAddress.IsLoopback(ip))
+            {
+                return true;
+            }
+
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                byte[] bytes = ip.GetAddressBytes();
+                if (bytes[0] == 10)
+                {
+                    return true;
+                }
+
+                if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)
+                {
+                    return true;
+                }
+
+                if (bytes[0] == 192 && bytes[1] == 168)
+                {
+                    return true;
+                }
+            }
+
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && ip.IsIPv6LinkLocal)
+            {
+                return true;
+            }
+
+            return false;
         }
 
         #region Supporting Classes
@@ -1173,7 +1275,7 @@ namespace ProxyPool
         private async Task<List<string>> FetchAllProxyListsAsync(CancellationToken cancellationToken)
         {
             var allProxies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var client = new HttpClient
+            using var client = new HttpClient
             {
                 Timeout = TimeSpan.FromSeconds(10)
             };
