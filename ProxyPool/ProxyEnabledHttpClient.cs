@@ -27,6 +27,8 @@ namespace ProxyPool
         private bool _allowDirectFallback;
         private string _userAgent;
         private int _healthCheckIntervalMinutes;
+        private Func<Uri, bool> _egressPolicy;
+        private bool _enableConsoleLogging;
         private static readonly string[] _blockedHosts = { "localhost", "127.0.0.1", "::1", "0.0.0.0" };
 
         #endregion Configuration Settings
@@ -39,6 +41,7 @@ namespace ProxyPool
         private Timer _healthCheckTimer;
         private bool _isInitialized;
         private bool _isDisposed;
+        private int _isHealthCheckRunning;
         private readonly string[] _testUrls = { "https://html.duckduckgo.com/html/", "https://duckduckgo.com/" };
 
         #endregion Internal State
@@ -53,9 +56,11 @@ namespace ProxyPool
         /// <param name="fetchTimeoutSeconds">Timeout for fetch operations in seconds</param>
         /// <param name="maxParallelTests">Maximum number of parallel proxy tests</param>
         /// <param name="maxRetries">Maximum number of retries per proxy</param>
-        /// <param name="healthCheckIntervalMinutes">Interval for proxy health checks in minutes</param>
         /// <param name="allowDirectFallback">Whether to allow direct connection if all proxies fail</param>
         /// <param name="userAgent">User agent string to use for requests</param>
+        /// <param name="healthCheckIntervalMinutes">Interval for proxy health checks in minutes</param>
+        /// <param name="enableConsoleLogging">Whether to emit logs to console output</param>
+        /// <param name="egressPolicy">Optional URI allow/deny predicate for outbound requests</param>
         public ProxyEnabledHttpClient(
             IEnumerable<string> proxyListUrls,
             int testTimeoutSeconds,
@@ -63,11 +68,11 @@ namespace ProxyPool
             int maxParallelTests,
             int maxRetries = 3,
             bool allowDirectFallback = false,
-            string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+            string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            int healthCheckIntervalMinutes = 30,
+            bool enableConsoleLogging = false,
+            Func<Uri, bool> egressPolicy = null)
         {
-            int healthCheckIntervalMinutes = 30;
-
-
             // Validate inputs
             _proxyListUrls = proxyListUrls ?? throw new ArgumentNullException(nameof(proxyListUrls));
             if (!_proxyListUrls.Any())
@@ -79,11 +84,15 @@ namespace ProxyPool
             // Store configuration
             _testTimeoutSeconds = Math.Max(1, testTimeoutSeconds);
             _fetchTimeoutSeconds = Math.Max(5, fetchTimeoutSeconds);
-            _maxParallelTests = Math.Max(1, Math.Min(500, maxParallelTests)); // Limit between 1 and 50
+            _maxParallelTests = Math.Max(1, Math.Min(500, maxParallelTests)); // Limit between 1 and 500
             _maxRetries = Math.Max(1, maxRetries);
             _healthCheckIntervalMinutes = Math.Max(5, healthCheckIntervalMinutes);
             _allowDirectFallback = allowDirectFallback;
-            _userAgent = string.IsNullOrWhiteSpace(userAgent) ? "Mozilla/5.0" : userAgent;
+            _enableConsoleLogging = enableConsoleLogging;
+            _egressPolicy = egressPolicy;
+            _userAgent = string.IsNullOrWhiteSpace(userAgent)
+                ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                : userAgent;
 
             if (_proxyListUrls.Any(url => !TryValidateTargetUri(url, out _)))
             {
@@ -127,11 +136,12 @@ namespace ProxyPool
                 throw new ArgumentException("URL must be a valid absolute HTTP/HTTPS URL.", nameof(url));
             }
 
-            if (IsBlockedHost(targetUri.Host))
+            if (IsBlockedHost(targetUri.Host) || !IsUriAllowed(targetUri))
             {
                 throw new ArgumentException("Target URL host is blocked by security policy.", nameof(url));
             }
 
+            string safeUrl = SanitizeUriForLogs(targetUri);
             Stopwatch stopwatch = Stopwatch.StartNew();
 
             try
@@ -140,7 +150,7 @@ namespace ProxyPool
                 var result = await TryWithHealthyProxiesAsync(url, cancellationToken);
                 if (!string.IsNullOrEmpty(result))
                 {
-                    LogInfo($"Successfully fetched {url} with known proxy in {stopwatch.ElapsedMilliseconds}ms");
+                    LogInfo($"Successfully fetched {safeUrl} with known proxy in {stopwatch.ElapsedMilliseconds}ms");
                     return result;
                 }
 
@@ -148,34 +158,34 @@ namespace ProxyPool
                 result = await TryWithNewProxiesAsync(url, cancellationToken);
                 if (!string.IsNullOrEmpty(result))
                 {
-                    LogInfo($"Successfully fetched {url} with new proxy in {stopwatch.ElapsedMilliseconds}ms");
+                    LogInfo($"Successfully fetched {safeUrl} with new proxy in {stopwatch.ElapsedMilliseconds}ms");
                     return result;
                 }
 
                 // Try direct connection as a last resort if allowed
                 if (_allowDirectFallback)
                 {
-                    LogWarning($"All proxies failed for {url}, trying direct connection");
+                    LogWarning($"All proxies failed for {safeUrl}, trying direct connection");
                     result = await FetchWithDirectConnectionAsync(url, cancellationToken);
                     if (!string.IsNullOrEmpty(result))
                     {
-                        LogInfo($"Successfully fetched {url} via direct connection in {stopwatch.ElapsedMilliseconds}ms");
+                        LogInfo($"Successfully fetched {safeUrl} via direct connection in {stopwatch.ElapsedMilliseconds}ms");
                         return result;
                     }
                 }
 
-                LogError($"Failed to fetch {url} after trying all available proxies" +
+                LogError($"Failed to fetch {safeUrl} after trying all available proxies" +
                          (_allowDirectFallback ? " and direct connection" : ""));
                 return string.Empty;
             }
             catch (OperationCanceledException)
             {
-                LogInfo($"Operation for {url} was canceled after {stopwatch.ElapsedMilliseconds}ms");
+                LogInfo($"Operation for {safeUrl} was canceled after {stopwatch.ElapsedMilliseconds}ms");
                 return string.Empty;
             }
             catch (Exception ex)
             {
-                LogError($"Unexpected error fetching {url}: {ex.Message}");
+                LogError($"Unexpected error fetching {safeUrl}: {ex.Message}");
                 return string.Empty;
             }
         }
@@ -289,8 +299,8 @@ namespace ProxyPool
                 var workingProxy = await FindBestWorkingProxyAsync(
                     proxyAddresses,
                     cancellationToken,
-                    minProxiesToCheck: 50,  // Check at least 1000 proxies
-                    maxTimeSeconds: 240       // Spend at most 60 seconds checking
+                    minProxiesToCheck: 50,  // Check at least 50 proxies
+                    maxTimeSeconds: 240       // Spend at most 240 seconds checking
                 );
 
                 if (workingProxy != null)
@@ -631,70 +641,66 @@ namespace ProxyPool
 
         private ProxyInfo ParseProxy(string proxyAddress)
         {
-            // Initialize defaults
-            string host = proxyAddress;
-            int port = 80;
-            ProxyType proxyType = ProxyType.Http;
-            string username = null;
-            string password = null;
+            string normalizedAddress = proxyAddress?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(normalizedAddress))
+            {
+                return new ProxyInfo { Address = proxyAddress };
+            }
 
             try
             {
-                // Handle authentication format: username:password@host:port
-                if (host.Contains('@'))
+                string candidate = normalizedAddress;
+                if (!candidate.Contains("://", StringComparison.Ordinal))
                 {
-                    string[] authParts = host.Split('@');
-                    if (authParts.Length == 2)
+                    candidate = $"http://{candidate}";
+                }
+
+                if (Uri.TryCreate(candidate, UriKind.Absolute, out var uri) && !string.IsNullOrWhiteSpace(uri.Host))
+                {
+                    ProxyType proxyType = uri.Scheme.ToLowerInvariant() switch
                     {
-                        string[] credentials = authParts[0].Split(':');
-                        if (credentials.Length == 2)
+                        "https" => ProxyType.Https,
+                        "socks4" => ProxyType.Socks4,
+                        "socks5" => ProxyType.Socks5,
+                        _ => ProxyType.Http
+                    };
+
+                    string username = null;
+                    string password = null;
+                    if (!string.IsNullOrEmpty(uri.UserInfo))
+                    {
+                        var credentials = uri.UserInfo.Split(':', 2);
+                        username = Uri.UnescapeDataString(credentials[0]);
+                        if (credentials.Length > 1)
                         {
-                            username = credentials[0];
-                            password = credentials[1];
+                            password = Uri.UnescapeDataString(credentials[1]);
                         }
-                        host = authParts[1];
                     }
-                }
 
-                // Parse host:port format
-                string[] parts = host.Split(':');
-                if (parts.Length >= 2)
-                {
-                    host = parts[0];
-                    if (int.TryParse(parts[1], out int parsedPort))
+                    return new ProxyInfo
                     {
-                        port = parsedPort;
-                    }
-                }
-
-                // Determine proxy type from address if specified
-                if (proxyAddress.Contains("socks5", StringComparison.OrdinalIgnoreCase))
-                {
-                    proxyType = ProxyType.Socks5;
-                }
-                else if (proxyAddress.Contains("socks4", StringComparison.OrdinalIgnoreCase))
-                {
-                    proxyType = ProxyType.Socks4;
-                }
-                else if (proxyAddress.Contains("https", StringComparison.OrdinalIgnoreCase))
-                {
-                    proxyType = ProxyType.Https;
+                        Address = proxyAddress,
+                        Host = uri.Host,
+                        Port = uri.IsDefaultPort
+                            ? (proxyType == ProxyType.Https ? 443 : 80)
+                            : uri.Port,
+                        Type = proxyType,
+                        Username = username,
+                        Password = password
+                    };
                 }
             }
             catch (Exception ex)
             {
                 LogDebug($"Error parsing proxy address {proxyAddress}: {ex.Message}");
-                // Use defaults if parsing fails
             }
 
             return new ProxyInfo
             {
                 Address = proxyAddress,
-                Host = host,
-                Port = port,
-                Type = proxyType,
-                Username = username,
-                Password = password
+                Host = normalizedAddress,
+                Port = 80,
+                Type = ProxyType.Http
             };
         }
 
@@ -742,7 +748,10 @@ namespace ProxyPool
                 return client;
             }
 
-            var webProxy = new WebProxy(proxy.Host, proxy.Port);
+            string scheme = proxy.Type == ProxyType.Socks5 ? "socks5" :
+                            proxy.Type == ProxyType.Socks4 ? "socks4" :
+                            proxy.Type == ProxyType.Https ? "https" : "http";
+            var webProxy = new WebProxy($"{scheme}://{proxy.Host}:{proxy.Port}");
 
             if (!string.IsNullOrEmpty(proxy.Username) && !string.IsNullOrEmpty(proxy.Password))
             {
@@ -770,6 +779,12 @@ namespace ProxyPool
 
         private void PerformHealthCheck(object state)
         {
+            if (Interlocked.CompareExchange(ref _isHealthCheckRunning, 1, 0) != 0)
+            {
+                LogDebug("Skipping periodic proxy health check because a previous run is still active");
+                return;
+            }
+
             // We can't use async directly in the timer callback, so we'll start a task
             Task.Run(async () =>
             {
@@ -852,6 +867,10 @@ namespace ProxyPool
                 {
                     LogError($"Error in proxy health check: {ex.Message}");
                 }
+                finally
+                {
+                    Interlocked.Exchange(ref _isHealthCheckRunning, 0);
+                }
             });
         }
 
@@ -888,19 +907,28 @@ namespace ProxyPool
         private void LogInfo(string message)
         {
             Debug.WriteLine($"[INFO] {DateTime.Now}: {message}");
-            Console.WriteLine($"[INFO] {message}");  // Also output to console
+            if (_enableConsoleLogging)
+            {
+                Console.WriteLine($"[INFO] {message}");
+            }
         }
 
         private void LogWarning(string message)
         {
             Debug.WriteLine($"[WARNING] {DateTime.Now}: {message}");
-            Console.WriteLine($"[WARNING] {message}");  // Also output to console
+            if (_enableConsoleLogging)
+            {
+                Console.WriteLine($"[WARNING] {message}");
+            }
         }
 
         private void LogError(string message)
         {
             Debug.WriteLine($"[ERROR] {DateTime.Now}: {message}");
-            Console.WriteLine($"[ERROR] {message}");  // Also output to console
+            if (_enableConsoleLogging)
+            {
+                Console.WriteLine($"[ERROR] {message}");
+            }
         }
 
         #endregion Logging Methods
@@ -937,7 +965,7 @@ namespace ProxyPool
         {
             var allProxies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var validSourceUrls = _proxyListUrls
-                .Where(url => TryValidateTargetUri(url, out var uri) && !IsBlockedHost(uri.Host))
+                .Where(url => TryValidateTargetUri(url, out var uri) && !IsBlockedHost(uri.Host) && IsUriAllowed(uri))
                 .ToList();
 
             if (validSourceUrls.Count == 0)
@@ -996,6 +1024,35 @@ namespace ProxyPool
             }
 
             return allProxies.ToList();
+        }
+
+
+        private bool IsUriAllowed(Uri uri)
+        {
+            if (uri == null)
+            {
+                return false;
+            }
+
+            return _egressPolicy == null || _egressPolicy(uri);
+        }
+
+        private static string SanitizeUriForLogs(Uri uri)
+        {
+            if (uri == null)
+            {
+                return string.Empty;
+            }
+
+            var builder = new UriBuilder(uri)
+            {
+                UserName = string.Empty,
+                Password = string.Empty,
+                Query = string.Empty,
+                Fragment = string.Empty
+            };
+
+            return builder.Uri.GetLeftPart(UriPartial.Path);
         }
 
         private static bool TryValidateTargetUri(string url, out Uri uri)
@@ -1084,39 +1141,55 @@ namespace ProxyPool
             public DateTime LastSuccess { get; set; } = DateTime.UtcNow;
             public TimeSpan AverageResponseTime { get; set; } = TimeSpan.FromSeconds(1);
             private readonly Queue<TimeSpan> _responseTimes = new Queue<TimeSpan>(10); // Track last 10 response times
+            private readonly object _sync = new object();
 
-            public bool IsHealthy => FailureCount < 3 && ReliabilityScore > 0.3;
+            public bool IsHealthy
+            {
+                get
+                {
+                    lock (_sync)
+                    {
+                        return FailureCount < 3 && ReliabilityScore > 0.3;
+                    }
+                }
+            }
 
             public void RecordSuccess(TimeSpan? responseTime = null)
             {
-                SuccessCount++;
-                FailureCount = Math.Max(0, FailureCount - 1); // Reduce failure count on success
-                ReliabilityScore = Math.Min(1.0, ReliabilityScore + 0.1);
-                LastChecked = DateTime.UtcNow;
-                LastSuccess = DateTime.UtcNow;
-
-                if (responseTime.HasValue)
+                lock (_sync)
                 {
-                    // Update average response time
-                    _responseTimes.Enqueue(responseTime.Value);
-                    if (_responseTimes.Count > 10)
-                    {
-                        _responseTimes.Dequeue();
-                    }
+                    SuccessCount++;
+                    FailureCount = Math.Max(0, FailureCount - 1); // Reduce failure count on success
+                    ReliabilityScore = Math.Min(1.0, ReliabilityScore + 0.1);
+                    LastChecked = DateTime.UtcNow;
+                    LastSuccess = DateTime.UtcNow;
 
-                    if (_responseTimes.Count > 0)
+                    if (responseTime.HasValue)
                     {
-                        AverageResponseTime = TimeSpan.FromMilliseconds(
-                            _responseTimes.Average(t => t.TotalMilliseconds));
+                        // Update average response time
+                        _responseTimes.Enqueue(responseTime.Value);
+                        if (_responseTimes.Count > 10)
+                        {
+                            _responseTimes.Dequeue();
+                        }
+
+                        if (_responseTimes.Count > 0)
+                        {
+                            AverageResponseTime = TimeSpan.FromMilliseconds(
+                                _responseTimes.Average(t => t.TotalMilliseconds));
+                        }
                     }
                 }
             }
 
             public void RecordFailure()
             {
-                FailureCount++;
-                ReliabilityScore = Math.Max(0.0, ReliabilityScore - 0.2);
-                LastChecked = DateTime.UtcNow;
+                lock (_sync)
+                {
+                    FailureCount++;
+                    ReliabilityScore = Math.Max(0.0, ReliabilityScore - 0.2);
+                    LastChecked = DateTime.UtcNow;
+                }
             }
         }
 
